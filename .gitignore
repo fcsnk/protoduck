@@ -1,0 +1,23 @@
+# Rust
+/target/
+Cargo.lock
+
+# Build artifacts
+/build/
+
+# Python venv
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# DuckDB extension outputs
+*.duckdb_extension
+*.duckdb
+
+# OS
+.DS_Store
+Thumbs.db
