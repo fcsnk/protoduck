@@ -9,6 +9,8 @@ use parking_lot::RwLock;
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 use prost_types::FileDescriptorSet;
+use protox::file::{File, FileResolver, GoogleFileResolver, ChainFileResolver};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{ProtoDuckError, Result};
 
@@ -19,13 +21,50 @@ static DESCRIPTOR_POOL: Lazy<RwLock<DescriptorPool>> = Lazy::new(|| {
     RwLock::new(pool.clone())
 });
 
+/// Counter for generating unique file names
+static FILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Custom file resolver that serves inline proto content
+struct InlineFileResolver {
+    filename: String,
+    content: String,
+}
+
+impl FileResolver for InlineFileResolver {
+    fn open_file(&self, name: &str) -> std::result::Result<File, protox::Error> {
+        if name == self.filename {
+            File::from_source(&self.filename, &self.content)
+        } else {
+            Err(protox::Error::file_not_found(name))
+        }
+    }
+}
+
 /// Add a proto schema from its text representation (.proto file content)
 ///
 /// This parses the proto file content and adds all message types to the global pool.
 pub fn add_schema_from_proto(proto_content: &str) -> Result<Vec<String>> {
-    // Use protox to compile the proto content to a FileDescriptorSet
-    let file_descriptor_set = protox::compile(&[proto_content], &[] as &[&str])
+    // Generate a unique filename for this inline content
+    let file_num = FILE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let filename = format!("inline_{}.proto", file_num);
+
+    // Create a resolver chain: inline content first, then Google well-known types
+    let inline_resolver = InlineFileResolver {
+        filename: filename.clone(),
+        content: proto_content.to_string(),
+    };
+    let mut resolver = ChainFileResolver::new();
+    resolver.add(inline_resolver);
+    resolver.add(GoogleFileResolver::new());
+
+    // Compile using the custom resolver
+    let mut compiler = protox::Compiler::with_file_resolver(resolver);
+    compiler.include_imports(true);
+    compiler
+        .open_file(&filename)
         .map_err(|e| ProtoDuckError::SchemaParseError(e.to_string()))?;
+
+    let file_descriptor_set = compiler.file_descriptor_set();
 
     add_file_descriptor_set(file_descriptor_set)
 }

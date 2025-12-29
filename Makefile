@@ -1,70 +1,49 @@
-.PHONY: all debug release clean configure test test_debug test_release install
+# ProtoDuck - DuckDB Protobuf Extension
+EXTENSION_NAME=protoduck
+TARGET_DUCKDB_VERSION=v1.4.3
+
+# Use unstable C API (required for this DuckDB version)
+USE_UNSTABLE_C_API=1
+
+# Include the base and rust makefiles from extension-ci-tools
+include extension-ci-tools/makefiles/c_api_extensions/base.Makefile
+include extension-ci-tools/makefiles/c_api_extensions/rust.Makefile
+
+.PHONY: all debug release clean configure test
 
 # Default target
 all: release
 
-# Configuration - set up Python venv and DuckDB
-configure:
-	@echo "Setting up Python virtual environment..."
-	python3 -m venv .venv
-	.venv/bin/pip install --upgrade pip
-	.venv/bin/pip install duckdb
+# Configure: set up venv and detect platform
+configure: venv platform extension_version
 	@echo "Configuration complete!"
 
-# Debug build
-debug:
-	@echo "Building debug..."
-	cargo build
-	@mkdir -p build/debug
-	@cp target/debug/libprotoduck.so build/debug/protoduck.duckdb_extension 2>/dev/null || \
-		cp target/debug/libprotoduck.dylib build/debug/protoduck.duckdb_extension 2>/dev/null || \
-		cp target/debug/protoduck.dll build/debug/protoduck.duckdb_extension 2>/dev/null || \
-		echo "Built library, copy manually if needed"
-	@echo "Debug build complete: build/debug/protoduck.duckdb_extension"
+# Debug build with metadata
+debug: build_extension_with_metadata_debug
+	@echo "Debug build complete: build/debug/$(EXTENSION_FILENAME)"
 
-# Release build
-release:
-	@echo "Building release..."
-	cargo build --release
-	@mkdir -p build/release
-	@cp target/release/libprotoduck.so build/release/protoduck.duckdb_extension 2>/dev/null || \
-		cp target/release/libprotoduck.dylib build/release/protoduck.duckdb_extension 2>/dev/null || \
-		cp target/release/protoduck.dll build/release/protoduck.duckdb_extension 2>/dev/null || \
-		echo "Built library, copy manually if needed"
-	@echo "Release build complete: build/release/protoduck.duckdb_extension"
+# Release build with metadata
+release: build_extension_with_metadata_release
+	@echo "Release build complete: build/release/$(EXTENSION_FILENAME)"
 
-# Run Rust tests
-test:
+# Run Rust unit tests
+test_rust:
 	cargo test
 
-# Run SQL tests with debug build
-test_debug: debug
-	@echo "Running SQL tests with debug build..."
-	@for f in test/sql/*.test; do \
-		if [ -f "$$f" ]; then \
-			echo "Running $$f..."; \
-			.venv/bin/python3 scripts/run_test.py "$$f" build/debug/protoduck.duckdb_extension; \
-		fi \
-	done
+# Run SQL logic tests (debug)
+test_debug: test_extension_debug
 
-# Run SQL tests with release build
-test_release: release
-	@echo "Running SQL tests with release build..."
-	@for f in test/sql/*.test; do \
-		if [ -f "$$f" ]; then \
-			echo "Running $$f..."; \
-			.venv/bin/python3 scripts/run_test.py "$$f" build/release/protoduck.duckdb_extension; \
-		fi \
-	done
+# Run SQL logic tests (release)
+test_release: test_extension_release
 
-# Clean build artifacts
-clean:
-	cargo clean
-	rm -rf build/
+# Alias for test
+test: test_rust test_release
 
-# Deep clean including venv
-clean_all: clean
-	rm -rf .venv/
+# Clean everything
+clean: clean_build clean_rust
+
+# Deep clean including configure
+clean_all: clean clean_configure
 
 # Format code
 fmt:
@@ -77,9 +56,3 @@ lint:
 # Check compilation without building
 check:
 	cargo check
-
-# Install to DuckDB extensions directory (Linux/macOS)
-install: release
-	@mkdir -p ~/.duckdb/extensions
-	@cp build/release/protoduck.duckdb_extension ~/.duckdb/extensions/
-	@echo "Installed to ~/.duckdb/extensions/protoduck.duckdb_extension"
