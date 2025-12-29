@@ -11,7 +11,7 @@ import duckdb
 proto_data = bytes([0x0a, 0x05, 0x41, 0x6c, 0x69, 0x63, 0x65, 0x10, 0x1e])
 
 con = duckdb.connect(config={'allow_unsigned_extensions': True})
-con.execute("LOAD './build/debug/protoduck.duckdb_extension'")
+con.execute("LOAD './build/release/protoduck.duckdb_extension'")
 
 # Load schema
 con.execute("""
