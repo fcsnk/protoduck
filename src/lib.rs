@@ -10,12 +10,10 @@ mod type_mapping;
 
 use std::sync::Arc;
 
-use arrow::array::{Array, BinaryArray, RecordBatch, StringArray};
-use arrow::datatypes::DataType;
-use duckdb::ffi;
+use duckdb::arrow::array::{Array, BinaryArray, RecordBatch, StringArray};
+use duckdb::arrow::datatypes::DataType;
 use duckdb::vscalar::arrow::{ArrowFunctionSignature, VArrowScalar};
-use duckdb::Connection;
-use duckdb_loadable_macros::duckdb_entrypoint_c_api;
+use duckdb::{duckdb_entrypoint_c_api, Connection};
 
 use crate::descriptor_pool::{
     add_schema_from_binary, add_schema_from_proto, decode_message, describe_message_type,

@@ -1,105 +1,46 @@
-# ProtoDuck - DuckDB Protobuf Extension
-# Standalone Makefile (no submodules required)
+.PHONY: all clean clean_all configure debug release test test_debug test_release fmt lint check install
+
+PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 EXTENSION_NAME=protoduck
-TARGET_DUCKDB_VERSION=v1.4.3
 
-# Platform detection
-UNAME_S := $(shell uname -s)
-ifeq ($(UNAME_S),Linux)
-    EXTENSION_LIB=lib$(EXTENSION_NAME).so
-    PLATFORM=linux_amd64
-endif
-ifeq ($(UNAME_S),Darwin)
-    EXTENSION_LIB=lib$(EXTENSION_NAME).dylib
-    UNAME_M := $(shell uname -m)
-    ifeq ($(UNAME_M),arm64)
-        PLATFORM=osx_arm64
-    else
-        PLATFORM=osx_amd64
-    endif
-endif
+# Required: duckdb-rs vscalar feature uses unstable C API
+USE_UNSTABLE_C_API=1
 
-EXTENSION_FILE=$(EXTENSION_NAME).duckdb_extension
-PYTHON_BIN?=python3
+TARGET_DUCKDB_VERSION=v1.5.2
 
-.PHONY: all debug release clean configure test install
-
-# Default target
 all: release
 
-# Configure: set up venv
-configure:
-	@echo "Setting up Python virtual environment..."
-	@mkdir -p configure
-	$(PYTHON_BIN) -m venv configure/venv
-	./configure/venv/bin/pip install --quiet --upgrade pip
-	./configure/venv/bin/pip install --quiet duckdb packaging
-	@echo "$(PLATFORM)" > configure/platform.txt
-	@git describe --tags --always 2>/dev/null > configure/extension_version.txt || echo "dev" > configure/extension_version.txt
-	@echo "Configuration complete!"
+include extension-ci-tools/makefiles/c_api_extensions/base.Makefile
+include extension-ci-tools/makefiles/c_api_extensions/rust.Makefile
 
-# Check if configured
-check_configure:
-	@test -d configure/venv || (echo "Please run 'make configure' first" && exit 1)
+configure: venv platform extension_version
 
-# Debug build
-debug: check_configure
-	@echo "Building debug..."
-	cargo build
-	@mkdir -p build/debug/extension/$(EXTENSION_NAME)
-	@cp target/debug/$(EXTENSION_LIB) build/debug/$(EXTENSION_LIB)
-	@./configure/venv/bin/python3 scripts/append_metadata.py \
-		build/debug/$(EXTENSION_LIB) \
-		build/debug/$(EXTENSION_FILE) \
-		$(EXTENSION_NAME) \
-		$(TARGET_DUCKDB_VERSION) \
-		$(PLATFORM)
-	@cp build/debug/$(EXTENSION_FILE) build/debug/extension/$(EXTENSION_NAME)/
-	@echo "Debug build complete: build/debug/$(EXTENSION_FILE)"
+debug: build_extension_library_debug build_extension_with_metadata_debug
 
-# Release build
-release: check_configure
-	@echo "Building release..."
-	cargo build --release
-	@mkdir -p build/release/extension/$(EXTENSION_NAME)
-	@cp target/release/$(EXTENSION_LIB) build/release/$(EXTENSION_LIB)
-	@./configure/venv/bin/python3 scripts/append_metadata.py \
-		build/release/$(EXTENSION_LIB) \
-		build/release/$(EXTENSION_FILE) \
-		$(EXTENSION_NAME) \
-		$(TARGET_DUCKDB_VERSION) \
-		$(PLATFORM)
-	@cp build/release/$(EXTENSION_FILE) build/release/extension/$(EXTENSION_NAME)/
-	@echo "Release build complete: build/release/$(EXTENSION_FILE)"
+release: build_extension_library_release build_extension_with_metadata_release
 
-# Run Rust unit tests
-test:
-	cargo test
+test: test_debug
 
-# Clean build artifacts
-clean:
-	cargo clean
-	rm -rf build/
+test_debug: test_extension_debug
 
-# Deep clean including configure
-clean_all: clean
-	rm -rf configure/
+test_release: test_extension_release
 
-# Format code
+clean: clean_build clean_rust
+
+clean_all: clean_configure clean
+
 fmt:
 	cargo fmt
 
-# Lint code
 lint:
 	cargo clippy -- -D warnings
 
-# Check compilation without building
 check:
 	cargo check
 
-# Install to user's DuckDB extensions directory
 install: release
-	@mkdir -p ~/.duckdb/extensions/$(PLATFORM)
-	@cp build/release/$(EXTENSION_FILE) ~/.duckdb/extensions/$(PLATFORM)/
-	@echo "Installed to ~/.duckdb/extensions/$(PLATFORM)/$(EXTENSION_FILE)"
+	@PLATFORM=$$(cat configure/platform.txt); \
+	mkdir -p ~/.duckdb/extensions/$$PLATFORM; \
+	cp build/release/$(EXTENSION_NAME).duckdb_extension ~/.duckdb/extensions/$$PLATFORM/; \
+	echo "Installed to ~/.duckdb/extensions/$$PLATFORM/"
