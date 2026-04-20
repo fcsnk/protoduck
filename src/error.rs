@@ -29,10 +29,6 @@ pub enum ProtoDuckError {
     #[error("Failed to serialize to JSON: {0}")]
     JsonSerializeError(String),
 
-    /// Invalid input data
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
-
     /// Index out of bounds for repeated field
     #[error("Index {0} out of bounds for repeated field '{1}' (length: {2})")]
     IndexOutOfBounds(usize, String, usize),
