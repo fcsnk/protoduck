@@ -11,6 +11,13 @@ TARGET_DUCKDB_VERSION=v1.5.2
 
 all: release
 
+# Auto-init the extension-ci-tools submodule when missing so fresh clones
+# (without --recursive) can still build.
+ifeq ($(wildcard extension-ci-tools/makefiles/c_api_extensions/base.Makefile),)
+  $(info extension-ci-tools submodule not initialized; running git submodule update --init --recursive)
+  _ := $(shell git submodule update --init --recursive)
+endif
+
 include extension-ci-tools/makefiles/c_api_extensions/base.Makefile
 include extension-ci-tools/makefiles/c_api_extensions/rust.Makefile
 

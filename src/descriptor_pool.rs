@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 use prost_types::FileDescriptorSet;
-use protox::file::{File, FileResolver, GoogleFileResolver, ChainFileResolver};
+use protox::file::{ChainFileResolver, File, FileResolver, GoogleFileResolver};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{ProtoDuckError, Result};
@@ -162,7 +162,7 @@ pub fn describe_message_type(message_type: &str) -> Result<String> {
         }
     }
 
-    description.push_str("}");
+    description.push('}');
 
     Ok(description)
 }
