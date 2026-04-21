@@ -41,18 +41,16 @@ impl VArrowScalar for ProtoSchemaAdd {
 
         let results: Vec<String> = content_col
             .iter()
-            .map(|content| {
-                match content {
-                    Some(proto_content) => match add_schema_from_proto(proto_content) {
-                        Ok(types) => format!(
-                            "Loaded {} message type(s): {}",
-                            types.len(),
-                            types.join(", ")
-                        ),
-                        Err(e) => format!("Error: {}", e),
-                    },
-                    None => "Error: NULL input".to_string(),
-                }
+            .map(|content| match content {
+                Some(proto_content) => match add_schema_from_proto(proto_content) {
+                    Ok(types) => format!(
+                        "Loaded {} message type(s): {}",
+                        types.len(),
+                        types.join(", ")
+                    ),
+                    Err(e) => format!("Error: {}", e),
+                },
+                None => "Error: NULL input".to_string(),
             })
             .collect();
 
@@ -88,18 +86,16 @@ impl VArrowScalar for ProtoSchemaAddBinary {
 
         let results: Vec<String> = blob_col
             .iter()
-            .map(|blob| {
-                match blob {
-                    Some(data) => match add_schema_from_binary(data) {
-                        Ok(types) => format!(
-                            "Loaded {} message type(s): {}",
-                            types.len(),
-                            types.join(", ")
-                        ),
-                        Err(e) => format!("Error: {}", e),
-                    },
-                    None => "Error: NULL input".to_string(),
-                }
+            .map(|blob| match blob {
+                Some(data) => match add_schema_from_binary(data) {
+                    Ok(types) => format!(
+                        "Loaded {} message type(s): {}",
+                        types.len(),
+                        types.join(", ")
+                    ),
+                    Err(e) => format!("Error: {}", e),
+                },
+                None => "Error: NULL input".to_string(),
             })
             .collect();
 
@@ -135,14 +131,12 @@ impl VArrowScalar for ProtoDescribe {
 
         let results: Vec<String> = type_col
             .iter()
-            .map(|message_type| {
-                match message_type {
-                    Some(mt) => match describe_message_type(mt) {
-                        Ok(desc) => desc,
-                        Err(e) => format!("Error: {}", e),
-                    },
-                    None => "Error: NULL input".to_string(),
-                }
+            .map(|message_type| match message_type {
+                Some(mt) => match describe_message_type(mt) {
+                    Ok(desc) => desc,
+                    Err(e) => format!("Error: {}", e),
+                },
+                None => "Error: NULL input".to_string(),
             })
             .collect();
 
@@ -185,19 +179,14 @@ impl VArrowScalar for ProtoToJson {
         let results: Vec<Option<String>> = blob_col
             .iter()
             .zip(type_col.iter())
-            .map(|(blob, message_type)| {
-                match (blob, message_type) {
-                    (Some(data), Some(mt)) => {
-                        decode_message(data, mt)
-                            .and_then(|msg| message_to_json(&msg))
-                            .and_then(|json| {
-                                serde_json::to_string(&json)
-                                    .map_err(|e| crate::error::ProtoDuckError::from(e))
-                            })
-                            .ok()
-                    }
-                    _ => None,
-                }
+            .map(|(blob, message_type)| match (blob, message_type) {
+                (Some(data), Some(mt)) => decode_message(data, mt)
+                    .and_then(|msg| message_to_json(&msg))
+                    .and_then(|json| {
+                        serde_json::to_string(&json).map_err(crate::error::ProtoDuckError::from)
+                    })
+                    .ok(),
+                _ => None,
             })
             .collect();
 
@@ -247,16 +236,14 @@ impl VArrowScalar for ProtoGet {
             .iter()
             .zip(type_col.iter())
             .zip(path_col.iter())
-            .map(|((blob, message_type), field_path)| {
-                match (blob, message_type, field_path) {
-                    (Some(data), Some(mt), Some(path)) => {
-                        decode_message(data, mt)
-                            .and_then(|msg| extract_field_value(&msg, path))
-                            .ok()
-                    }
+            .map(
+                |((blob, message_type), field_path)| match (blob, message_type, field_path) {
+                    (Some(data), Some(mt), Some(path)) => decode_message(data, mt)
+                        .and_then(|msg| extract_field_value(&msg, path))
+                        .ok(),
                     _ => None,
-                }
-            })
+                },
+            )
             .collect();
 
         Ok(Arc::new(StringArray::from(results)))
@@ -274,14 +261,14 @@ impl VArrowScalar for ProtoGet {
 // Extension Entry Point
 // ============================================================================
 
-#[duckdb_entrypoint_c_api(ext_name = "protoduck", min_duckdb_version = "v1.0.0")]
+#[duckdb_entrypoint_c_api(ext_name = "protoduck", min_duckdb_version = "v1.5.2")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn std::error::Error>> {
     // Register all scalar functions
     con.register_scalar_function::<ProtoSchemaAdd>("proto_schema_add")?;
     con.register_scalar_function::<ProtoSchemaAddBinary>("proto_schema_add_binary")?;
     con.register_scalar_function::<ProtoDescribe>("proto_describe")?;
     con.register_scalar_function::<ProtoToJson>("proto_to_json")?;
-    con.register_scalar_function::<ProtoToJson>("proto_decode")?;  // alias
+    con.register_scalar_function::<ProtoToJson>("proto_decode")?; // alias
     con.register_scalar_function::<ProtoGet>("proto_get")?;
 
     Ok(())

@@ -3,7 +3,7 @@
 //! This module handles the conversion of protobuf values to their
 //! appropriate representations for DuckDB.
 
-use prost_reflect::{DynamicMessage, Kind, MapKey, ReflectMessage, Value};
+use prost_reflect::{DynamicMessage, FieldDescriptor, Kind, MapKey, ReflectMessage, Value};
 use serde_json::Value as JsonValue;
 
 use crate::error::{ProtoDuckError, Result};
@@ -37,10 +37,7 @@ pub fn message_to_json(message: &DynamicMessage) -> Result<JsonValue> {
 }
 
 /// Convert a protobuf Value to a JSON value
-fn value_to_json(
-    value: &Value,
-    field: &prost_reflect::FieldDescriptor,
-) -> Result<JsonValue> {
+fn value_to_json(value: &Value, field: &prost_reflect::FieldDescriptor) -> Result<JsonValue> {
     match value {
         Value::Bool(b) => Ok(JsonValue::Bool(*b)),
         Value::I32(i) => Ok(JsonValue::Number((*i).into())),
@@ -53,8 +50,7 @@ fn value_to_json(
             Ok(JsonValue::Number(n))
         }
         Value::F64(f) => {
-            let n = serde_json::Number::from_f64(*f)
-                .unwrap_or_else(|| serde_json::Number::from(0));
+            let n = serde_json::Number::from_f64(*f).unwrap_or_else(|| serde_json::Number::from(0));
             Ok(JsonValue::Number(n))
         }
         Value::String(s) => Ok(JsonValue::String(s.clone())),
@@ -75,10 +71,8 @@ fn value_to_json(
         }
         Value::Message(msg) => message_to_json(msg),
         Value::List(list) => {
-            let items: Result<Vec<JsonValue>> = list
-                .iter()
-                .map(|v| value_to_json(v, field))
-                .collect();
+            let items: Result<Vec<JsonValue>> =
+                list.iter().map(|v| value_to_json(v, field)).collect();
             Ok(JsonValue::Array(items?))
         }
         Value::Map(map) => {
@@ -214,7 +208,9 @@ fn parse_field_path(path: &str) -> Result<Vec<PathPart>> {
     }
 
     if parts.is_empty() {
-        return Err(ProtoDuckError::InvalidFieldPath("Empty field path".to_string()));
+        return Err(ProtoDuckError::InvalidFieldPath(
+            "Empty field path".to_string(),
+        ));
     }
 
     Ok(parts)
@@ -225,17 +221,16 @@ fn apply_path_part(value: Value, part: &PathPart, original_path: &str) -> Result
     match (value, part) {
         (Value::Message(msg), PathPart::Field(field_name)) => {
             let descriptor = msg.descriptor();
-            let field = descriptor
-                .get_field_by_name(field_name)
-                .ok_or_else(|| {
-                    ProtoDuckError::FieldNotFound(
-                        field_name.clone(),
-                        descriptor.full_name().to_string(),
-                    )
-                })?;
+            let field = descriptor.get_field_by_name(field_name).ok_or_else(|| {
+                ProtoDuckError::FieldNotFound(
+                    field_name.clone(),
+                    descriptor.full_name().to_string(),
+                )
+            })?;
 
             // Get the field value (this returns the default if not set)
-            Ok(msg.get_field(&field).into_owned())
+            let value = msg.get_field(&field).into_owned();
+            Ok(resolve_enum_names(value, &field))
         }
         (Value::List(list), PathPart::Index(idx)) => {
             if *idx >= list.len() {
@@ -260,34 +255,59 @@ fn apply_path_part(value: Value, part: &PathPart, original_path: &str) -> Result
             };
 
             if let Some(mk) = map_key {
-                map.get(&mk)
-                    .cloned()
-                    .ok_or_else(|| ProtoDuckError::MapKeyNotFound(key.clone(), original_path.to_string()))
+                map.get(&mk).cloned().ok_or_else(|| {
+                    ProtoDuckError::MapKeyNotFound(key.clone(), original_path.to_string())
+                })
             } else {
-                Err(ProtoDuckError::MapKeyNotFound(key.clone(), original_path.to_string()))
+                Err(ProtoDuckError::MapKeyNotFound(
+                    key.clone(),
+                    original_path.to_string(),
+                ))
             }
         }
-        (Value::List(_), PathPart::Field(f)) => {
-            Err(ProtoDuckError::InvalidFieldPath(format!(
-                "Cannot access field '{}' on a repeated value - use an index first",
-                f
-            )))
-        }
+        (Value::List(_), PathPart::Field(f)) => Err(ProtoDuckError::InvalidFieldPath(format!(
+            "Cannot access field '{}' on a repeated value - use an index first",
+            f
+        ))),
         (_, PathPart::Index(_)) => {
             Err(ProtoDuckError::NotARepeatedField(original_path.to_string()))
         }
-        (_, PathPart::MapKey(k)) => {
-            Err(ProtoDuckError::InvalidFieldPath(format!(
-                "Cannot access map key '{}' on non-map value",
-                k
-            )))
+        (_, PathPart::MapKey(k)) => Err(ProtoDuckError::InvalidFieldPath(format!(
+            "Cannot access map key '{}' on non-map value",
+            k
+        ))),
+        (_, PathPart::Field(f)) => Err(ProtoDuckError::InvalidFieldPath(format!(
+            "Cannot access field '{}' on non-message value",
+            f
+        ))),
+    }
+}
+
+/// Rewrite `EnumNumber` values to their symbolic name (matching `proto_to_json`
+/// behavior and the documented type mapping). Applied eagerly while walking a
+/// field path, so scalar enum fields, repeated enum fields, and enum-valued
+/// map entries all surface the enum's name rather than its wire number.
+fn resolve_enum_names(value: Value, field: &FieldDescriptor) -> Value {
+    match value {
+        Value::EnumNumber(n) => {
+            if let Kind::Enum(enum_desc) = field.kind() {
+                if let Some(enum_value) = enum_desc.get_value(n) {
+                    return Value::String(enum_value.name().to_string());
+                }
+            }
+            Value::EnumNumber(n)
         }
-        (_, PathPart::Field(f)) => {
-            Err(ProtoDuckError::InvalidFieldPath(format!(
-                "Cannot access field '{}' on non-message value",
-                f
-            )))
-        }
+        Value::List(list) => Value::List(
+            list.into_iter()
+                .map(|v| resolve_enum_names(v, field))
+                .collect(),
+        ),
+        Value::Map(map) => Value::Map(
+            map.into_iter()
+                .map(|(k, v)| (k, resolve_enum_names(v, field)))
+                .collect(),
+        ),
+        other => other,
     }
 }
 

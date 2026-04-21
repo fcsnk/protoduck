@@ -1,0 +1,73 @@
+# name: test/sql/protoduck.test
+# description: smoke tests for protoduck scalar functions
+# group: [protoduck]
+
+# Before the extension is loaded, our functions do not exist.
+statement error
+SELECT proto_schema_add('syntax = "proto3"; message M { string s = 1; }');
+----
+Catalog Error: Scalar Function with name proto_schema_add does not exist!
+
+# Load the extension for the remainder of the file.
+require protoduck
+
+# Register a schema with a handful of types we care about.
+statement ok
+SELECT proto_schema_add('
+    syntax = "proto3";
+    package demo;
+    enum Status { UNKNOWN = 0; ACTIVE = 1; INACTIVE = 2; }
+    message Address { string city = 1; string country = 2; }
+    message Person {
+        string name = 1;
+        int32  age  = 2;
+        Status status = 3;
+        Address address = 4;
+        repeated string tags = 5;
+        map<string, string> attributes = 6;
+    }
+');
+
+# proto_describe should return a non-empty description for a known type.
+query I
+SELECT length(proto_describe('demo.Person')) > 0;
+----
+true
+
+# Encoded payload for demo.Person { name: "Alice", age: 30 }.
+# Field 1 (string, tag 0x0a), length 5, "Alice"; Field 2 (varint, tag 0x10), value 30.
+query T
+SELECT proto_get(
+    '\x0a\x05Alice\x10\x1e'::BLOB,
+    'demo.Person',
+    'name'
+);
+----
+Alice
+
+query T
+SELECT proto_get(
+    '\x0a\x05Alice\x10\x1e'::BLOB,
+    'demo.Person',
+    'age'
+);
+----
+30
+
+# proto_to_json should round-trip the same payload into JSON.
+query T
+SELECT proto_to_json(
+    '\x0a\x05Alice\x10\x1e'::BLOB,
+    'demo.Person'
+) LIKE '%"name":%Alice%';
+----
+true
+
+# proto_decode is a documented alias of proto_to_json.
+query T
+SELECT proto_decode(
+    '\x0a\x05Alice\x10\x1e'::BLOB,
+    'demo.Person'
+) LIKE '%"age":%30%';
+----
+true
