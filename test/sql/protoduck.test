@@ -34,6 +34,26 @@ SELECT length(proto_describe('demo.Person')) > 0;
 ----
 true
 
+query T
+SELECT proto_describe(NULL) IS NULL;
+----
+true
+
+statement error
+SELECT proto_describe('demo.Missing');
+----
+Message type 'demo.Missing' not found. Did you load the schema with proto_schema_add()?
+
+query T
+SELECT proto_schema_add(NULL) IS NULL;
+----
+true
+
+statement error
+SELECT proto_schema_add('syntax = "proto3"; message Broken {');
+----
+Failed to parse proto schema:
+
 # Encoded payload for demo.Person { name: "Alice", age: 30 }.
 # Field 1 (string, tag 0x0a), length 5, "Alice"; Field 2 (varint, tag 0x10), value 30.
 query T
