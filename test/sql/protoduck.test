@@ -72,6 +72,29 @@ SELECT proto_decode(
 ----
 true
 
+# NULL inputs remain NULL, but non-NULL decode/path failures should surface as errors.
+query T
+SELECT proto_get(NULL::BLOB, 'demo.Person', 'name') IS NULL;
+----
+true
+
+statement error
+SELECT proto_get(
+    '\x0a\x05Alice\x10\x1e'::BLOB,
+    'demo.Person',
+    'missing_field'
+);
+----
+Field 'missing_field' not found in message type 'demo.Person'
+
+statement error
+SELECT proto_to_json(
+    '\x0a\x05Alice\x10\x1e'::BLOB,
+    'demo.Missing'
+);
+----
+Message type 'demo.Missing' not found. Did you load the schema with proto_schema_add()?
+
 # Numeric map keys should use the map's declared key type, not a guessed type.
 statement ok
 SELECT proto_schema_add('
