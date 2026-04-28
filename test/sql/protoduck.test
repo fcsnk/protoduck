@@ -71,3 +71,31 @@ SELECT proto_decode(
 ) LIKE '%"age":%30%';
 ----
 true
+
+# Numeric map keys should use the map's declared key type, not a guessed type.
+statement ok
+SELECT proto_schema_add('
+    syntax = "proto3";
+    package maptest;
+    message NumericMaps {
+        map<int64, string> signed_values = 1;
+        map<uint64, string> unsigned_values = 2;
+    }
+');
+
+# signed_values { key: 1, value: "signed" }
+# unsigned_values { key: 1, value: "unsigned" }
+query TT
+SELECT
+    proto_get(
+        '\x0a\x0a\x08\x01\x12\x06signed\x12\x0c\x08\x01\x12\x08unsigned'::BLOB,
+        'maptest.NumericMaps',
+        'signed_values[1]'
+    ),
+    proto_get(
+        '\x0a\x0a\x08\x01\x12\x06signed\x12\x0c\x08\x01\x12\x08unsigned'::BLOB,
+        'maptest.NumericMaps',
+        'unsigned_values[1]'
+    );
+----
+signed	unsigned
