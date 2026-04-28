@@ -40,20 +40,25 @@ impl VArrowScalar for ProtoSchemaAdd {
             .downcast_ref::<StringArray>()
             .ok_or("Expected string array for proto content")?;
 
-        let results: Vec<String> = content_col
+        let results: Vec<Option<String>> = content_col
             .iter()
-            .map(|content| match content {
-                Some(proto_content) => match add_schema_from_proto(state, proto_content) {
-                    Ok(types) => format!(
-                        "Loaded {} message type(s): {}",
-                        types.len(),
-                        types.join(", ")
-                    ),
-                    Err(e) => format!("Error: {}", e),
+            .map(
+                |content| -> Result<Option<String>, crate::error::ProtoDuckError> {
+                    match content {
+                        Some(proto_content) => {
+                            add_schema_from_proto(state, proto_content).map(|types| {
+                                Some(format!(
+                                    "Loaded {} message type(s): {}",
+                                    types.len(),
+                                    types.join(", ")
+                                ))
+                            })
+                        }
+                        None => Ok(None),
+                    }
                 },
-                None => "Error: NULL input".to_string(),
-            })
-            .collect();
+            )
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Arc::new(StringArray::from(results)))
     }
@@ -85,20 +90,23 @@ impl VArrowScalar for ProtoSchemaAddBinary {
             .downcast_ref::<BinaryArray>()
             .ok_or("Expected binary array for descriptor set")?;
 
-        let results: Vec<String> = blob_col
+        let results: Vec<Option<String>> = blob_col
             .iter()
-            .map(|blob| match blob {
-                Some(data) => match add_schema_from_binary(state, data) {
-                    Ok(types) => format!(
-                        "Loaded {} message type(s): {}",
-                        types.len(),
-                        types.join(", ")
-                    ),
-                    Err(e) => format!("Error: {}", e),
+            .map(
+                |blob| -> Result<Option<String>, crate::error::ProtoDuckError> {
+                    match blob {
+                        Some(data) => add_schema_from_binary(state, data).map(|types| {
+                            Some(format!(
+                                "Loaded {} message type(s): {}",
+                                types.len(),
+                                types.join(", ")
+                            ))
+                        }),
+                        None => Ok(None),
+                    }
                 },
-                None => "Error: NULL input".to_string(),
-            })
-            .collect();
+            )
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Arc::new(StringArray::from(results)))
     }
@@ -130,16 +138,17 @@ impl VArrowScalar for ProtoDescribe {
             .downcast_ref::<StringArray>()
             .ok_or("Expected string array for message type")?;
 
-        let results: Vec<String> = type_col
+        let results: Vec<Option<String>> = type_col
             .iter()
-            .map(|message_type| match message_type {
-                Some(mt) => match describe_message_type(state, mt) {
-                    Ok(desc) => desc,
-                    Err(e) => format!("Error: {}", e),
+            .map(
+                |message_type| -> Result<Option<String>, crate::error::ProtoDuckError> {
+                    match message_type {
+                        Some(mt) => describe_message_type(state, mt).map(Some),
+                        None => Ok(None),
+                    }
                 },
-                None => "Error: NULL input".to_string(),
-            })
-            .collect();
+            )
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Arc::new(StringArray::from(results)))
     }
