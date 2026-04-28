@@ -17,6 +17,7 @@ use duckdb::{duckdb_entrypoint_c_api, Connection};
 
 use crate::descriptor_pool::{
     add_schema_from_binary, add_schema_from_proto, decode_message, describe_message_type,
+    DescriptorPoolState,
 };
 use crate::type_mapping::{extract_field_value, message_to_json};
 
@@ -27,10 +28,10 @@ use crate::type_mapping::{extract_field_value, message_to_json};
 struct ProtoSchemaAdd;
 
 impl VArrowScalar for ProtoSchemaAdd {
-    type State = ();
+    type State = DescriptorPoolState;
 
     fn invoke(
-        _state: &Self::State,
+        state: &Self::State,
         input: RecordBatch,
     ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
         let content_col = input
@@ -42,7 +43,7 @@ impl VArrowScalar for ProtoSchemaAdd {
         let results: Vec<String> = content_col
             .iter()
             .map(|content| match content {
-                Some(proto_content) => match add_schema_from_proto(proto_content) {
+                Some(proto_content) => match add_schema_from_proto(state, proto_content) {
                     Ok(types) => format!(
                         "Loaded {} message type(s): {}",
                         types.len(),
@@ -72,10 +73,10 @@ impl VArrowScalar for ProtoSchemaAdd {
 struct ProtoSchemaAddBinary;
 
 impl VArrowScalar for ProtoSchemaAddBinary {
-    type State = ();
+    type State = DescriptorPoolState;
 
     fn invoke(
-        _state: &Self::State,
+        state: &Self::State,
         input: RecordBatch,
     ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
         let blob_col = input
@@ -87,7 +88,7 @@ impl VArrowScalar for ProtoSchemaAddBinary {
         let results: Vec<String> = blob_col
             .iter()
             .map(|blob| match blob {
-                Some(data) => match add_schema_from_binary(data) {
+                Some(data) => match add_schema_from_binary(state, data) {
                     Ok(types) => format!(
                         "Loaded {} message type(s): {}",
                         types.len(),
@@ -117,10 +118,10 @@ impl VArrowScalar for ProtoSchemaAddBinary {
 struct ProtoDescribe;
 
 impl VArrowScalar for ProtoDescribe {
-    type State = ();
+    type State = DescriptorPoolState;
 
     fn invoke(
-        _state: &Self::State,
+        state: &Self::State,
         input: RecordBatch,
     ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
         let type_col = input
@@ -132,7 +133,7 @@ impl VArrowScalar for ProtoDescribe {
         let results: Vec<String> = type_col
             .iter()
             .map(|message_type| match message_type {
-                Some(mt) => match describe_message_type(mt) {
+                Some(mt) => match describe_message_type(state, mt) {
                     Ok(desc) => desc,
                     Err(e) => format!("Error: {}", e),
                 },
@@ -158,10 +159,10 @@ impl VArrowScalar for ProtoDescribe {
 struct ProtoToJson;
 
 impl VArrowScalar for ProtoToJson {
-    type State = ();
+    type State = DescriptorPoolState;
 
     fn invoke(
-        _state: &Self::State,
+        state: &Self::State,
         input: RecordBatch,
     ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
         let blob_col = input
@@ -180,7 +181,7 @@ impl VArrowScalar for ProtoToJson {
             .iter()
             .zip(type_col.iter())
             .map(|(blob, message_type)| match (blob, message_type) {
-                (Some(data), Some(mt)) => decode_message(data, mt)
+                (Some(data), Some(mt)) => decode_message(state, data, mt)
                     .and_then(|msg| message_to_json(&msg))
                     .and_then(|json| {
                         serde_json::to_string(&json).map_err(crate::error::ProtoDuckError::from)
@@ -208,10 +209,10 @@ impl VArrowScalar for ProtoToJson {
 struct ProtoGet;
 
 impl VArrowScalar for ProtoGet {
-    type State = ();
+    type State = DescriptorPoolState;
 
     fn invoke(
-        _state: &Self::State,
+        state: &Self::State,
         input: RecordBatch,
     ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
         let blob_col = input
@@ -238,7 +239,7 @@ impl VArrowScalar for ProtoGet {
             .zip(path_col.iter())
             .map(
                 |((blob, message_type), field_path)| match (blob, message_type, field_path) {
-                    (Some(data), Some(mt), Some(path)) => decode_message(data, mt)
+                    (Some(data), Some(mt), Some(path)) => decode_message(state, data, mt)
                         .and_then(|msg| extract_field_value(&msg, path))
                         .ok(),
                     _ => None,
@@ -263,13 +264,21 @@ impl VArrowScalar for ProtoGet {
 
 #[duckdb_entrypoint_c_api(ext_name = "protoduck", min_duckdb_version = "v1.5.2")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn std::error::Error>> {
+    let descriptor_state = DescriptorPoolState::default();
+
     // Register all scalar functions
-    con.register_scalar_function::<ProtoSchemaAdd>("proto_schema_add")?;
-    con.register_scalar_function::<ProtoSchemaAddBinary>("proto_schema_add_binary")?;
-    con.register_scalar_function::<ProtoDescribe>("proto_describe")?;
-    con.register_scalar_function::<ProtoToJson>("proto_to_json")?;
-    con.register_scalar_function::<ProtoToJson>("proto_decode")?; // alias
-    con.register_scalar_function::<ProtoGet>("proto_get")?;
+    con.register_scalar_function_with_state::<ProtoSchemaAdd>(
+        "proto_schema_add",
+        &descriptor_state,
+    )?;
+    con.register_scalar_function_with_state::<ProtoSchemaAddBinary>(
+        "proto_schema_add_binary",
+        &descriptor_state,
+    )?;
+    con.register_scalar_function_with_state::<ProtoDescribe>("proto_describe", &descriptor_state)?;
+    con.register_scalar_function_with_state::<ProtoToJson>("proto_to_json", &descriptor_state)?;
+    con.register_scalar_function_with_state::<ProtoToJson>("proto_decode", &descriptor_state)?; // alias
+    con.register_scalar_function_with_state::<ProtoGet>("proto_get", &descriptor_state)?;
 
     Ok(())
 }

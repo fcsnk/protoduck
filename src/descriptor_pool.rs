@@ -1,28 +1,38 @@
-//! Global protobuf descriptor pool management
+//! Protobuf descriptor pool management
 //!
-//! This module provides a thread-safe global descriptor pool that holds
-//! all loaded protobuf schemas. Users can add schemas using proto_schema_add()
-//! and then decode messages using those schemas.
+//! This module provides a thread-safe descriptor pool that holds schemas loaded
+//! through proto_schema_add() for one registered extension instance.
 
-use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 use prost_types::FileDescriptorSet;
 use protox::file::{ChainFileResolver, File, FileResolver, GoogleFileResolver};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use crate::error::{ProtoDuckError, Result};
 
-/// Global descriptor pool that holds all loaded protobuf schemas
-static DESCRIPTOR_POOL: Lazy<RwLock<DescriptorPool>> = Lazy::new(|| {
-    // Start with an empty pool, but include well-known types
-    let pool = DescriptorPool::global();
-    RwLock::new(pool.clone())
-});
+/// Shared descriptor pool state for all ProtoDuck scalar functions registered
+/// by one extension load.
+pub type DescriptorPoolState = Arc<DescriptorPoolStore>;
 
-/// Counter for generating unique file names
-static FILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+/// Descriptor pool plus resolver-local filename counter.
+pub struct DescriptorPoolStore {
+    pool: RwLock<DescriptorPool>,
+    file_counter: AtomicUsize,
+}
+
+impl Default for DescriptorPoolStore {
+    fn default() -> Self {
+        Self {
+            pool: RwLock::new(DescriptorPool::global()),
+            file_counter: AtomicUsize::new(0),
+        }
+    }
+}
 
 /// Custom file resolver that serves inline proto content
 struct InlineFileResolver {
@@ -42,10 +52,13 @@ impl FileResolver for InlineFileResolver {
 
 /// Add a proto schema from its text representation (.proto file content)
 ///
-/// This parses the proto file content and adds all message types to the global pool.
-pub fn add_schema_from_proto(proto_content: &str) -> Result<Vec<String>> {
+/// This parses the proto file content and adds all message types to the pool.
+pub fn add_schema_from_proto(
+    state: &DescriptorPoolState,
+    proto_content: &str,
+) -> Result<Vec<String>> {
     // Generate a unique filename for this inline content
-    let file_num = FILE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file_num = state.file_counter.fetch_add(1, Ordering::SeqCst);
     let filename = format!("inline_{}.proto", file_num);
 
     // Create a resolver chain: inline content first, then Google well-known types
@@ -66,20 +79,23 @@ pub fn add_schema_from_proto(proto_content: &str) -> Result<Vec<String>> {
 
     let file_descriptor_set = compiler.file_descriptor_set();
 
-    add_file_descriptor_set(file_descriptor_set)
+    add_file_descriptor_set(state, file_descriptor_set)
 }
 
 /// Add a proto schema from a compiled FileDescriptorSet (binary format)
 ///
 /// This is useful when you have pre-compiled .desc files from protoc.
-pub fn add_schema_from_binary(data: &[u8]) -> Result<Vec<String>> {
+pub fn add_schema_from_binary(state: &DescriptorPoolState, data: &[u8]) -> Result<Vec<String>> {
     let file_descriptor_set = FileDescriptorSet::decode(data)?;
-    add_file_descriptor_set(file_descriptor_set)
+    add_file_descriptor_set(state, file_descriptor_set)
 }
 
-/// Add a FileDescriptorSet to the global pool
-fn add_file_descriptor_set(fds: FileDescriptorSet) -> Result<Vec<String>> {
-    let mut pool = DESCRIPTOR_POOL.write();
+/// Add a FileDescriptorSet to the pool
+fn add_file_descriptor_set(
+    state: &DescriptorPoolState,
+    fds: FileDescriptorSet,
+) -> Result<Vec<String>> {
+    let mut pool = state.pool.write();
 
     // Create a new pool that includes the existing pool plus new descriptors
     let mut new_pool = pool.clone();
@@ -99,8 +115,11 @@ fn add_file_descriptor_set(fds: FileDescriptorSet) -> Result<Vec<String>> {
 /// Get a message descriptor by its fully qualified name
 ///
 /// The name can be with or without a leading dot.
-pub fn get_message_descriptor(message_type: &str) -> Result<MessageDescriptor> {
-    let pool = DESCRIPTOR_POOL.read();
+pub fn get_message_descriptor(
+    state: &DescriptorPoolState,
+    message_type: &str,
+) -> Result<MessageDescriptor> {
+    let pool = state.pool.read();
 
     // Try with and without leading dot
     let type_name = message_type.trim_start_matches('.');
@@ -110,15 +129,19 @@ pub fn get_message_descriptor(message_type: &str) -> Result<MessageDescriptor> {
 }
 
 /// Decode a protobuf message from binary data
-pub fn decode_message(data: &[u8], message_type: &str) -> Result<DynamicMessage> {
-    let descriptor = get_message_descriptor(message_type)?;
+pub fn decode_message(
+    state: &DescriptorPoolState,
+    data: &[u8],
+    message_type: &str,
+) -> Result<DynamicMessage> {
+    let descriptor = get_message_descriptor(state, message_type)?;
     let message = DynamicMessage::decode(descriptor, data)?;
     Ok(message)
 }
 
 /// Get a formatted description of a message type
-pub fn describe_message_type(message_type: &str) -> Result<String> {
-    let descriptor = get_message_descriptor(message_type)?;
+pub fn describe_message_type(state: &DescriptorPoolState, message_type: &str) -> Result<String> {
+    let descriptor = get_message_descriptor(state, message_type)?;
     let mut description = String::new();
 
     description.push_str(&format!("message {} {{\n", descriptor.name()));
@@ -220,10 +243,31 @@ mod tests {
             }
         "#;
 
-        let types = add_schema_from_proto(proto).unwrap();
+        let state = DescriptorPoolState::default();
+        let types = add_schema_from_proto(&state, proto).unwrap();
         assert!(types.iter().any(|t| t.contains("Person")));
 
-        let descriptor = get_message_descriptor("test.Person").unwrap();
+        let descriptor = get_message_descriptor(&state, "test.Person").unwrap();
         assert_eq!(descriptor.name(), "Person");
+    }
+
+    #[test]
+    fn test_schema_state_is_isolated() {
+        let proto = r#"
+            syntax = "proto3";
+            package isolated;
+
+            message Person {
+                string name = 1;
+            }
+        "#;
+
+        let first_state = DescriptorPoolState::default();
+        let second_state = DescriptorPoolState::default();
+
+        add_schema_from_proto(&first_state, proto).unwrap();
+
+        assert!(get_message_descriptor(&first_state, "isolated.Person").is_ok());
+        assert!(get_message_descriptor(&second_state, "isolated.Person").is_err());
     }
 }

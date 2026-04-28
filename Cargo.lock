@@ -1516,7 +1516,6 @@ dependencies = [
  "base64",
  "duckdb",
  "libduckdb-sys",
- "once_cell",
  "parking_lot",
  "prost",
  "prost-reflect",
