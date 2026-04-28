@@ -116,13 +116,36 @@ pub fn extract_field_value(message: &DynamicMessage, path: &str) -> Result<Strin
 /// Navigate to a value within a message following a field path
 fn navigate_to_value(message: &DynamicMessage, path: &str) -> Result<Value> {
     let parts = parse_field_path(path)?;
-    let mut current: Value = Value::Message(message.clone());
+    let mut current = PathValue::new(Value::Message(message.clone()));
 
     for part in parts {
         current = apply_path_part(current, &part, path)?;
     }
 
-    Ok(current)
+    Ok(current.value)
+}
+
+/// Current value while walking a field path. Map values carry the descriptor for
+/// their declared key field so map lookups can parse keys without guessing.
+struct PathValue {
+    value: Value,
+    map_key_field: Option<FieldDescriptor>,
+}
+
+impl PathValue {
+    fn new(value: Value) -> Self {
+        Self {
+            value,
+            map_key_field: None,
+        }
+    }
+
+    fn with_map_key(value: Value, map_key_field: Option<FieldDescriptor>) -> Self {
+        Self {
+            value,
+            map_key_field,
+        }
+    }
 }
 
 /// Path part types
@@ -217,7 +240,12 @@ fn parse_field_path(path: &str) -> Result<Vec<PathPart>> {
 }
 
 /// Apply a path part to get the next value
-fn apply_path_part(value: Value, part: &PathPart, original_path: &str) -> Result<Value> {
+fn apply_path_part(value: PathValue, part: &PathPart, original_path: &str) -> Result<PathValue> {
+    let PathValue {
+        value,
+        map_key_field,
+    } = value;
+
     match (value, part) {
         (Value::Message(msg), PathPart::Field(field_name)) => {
             let descriptor = msg.descriptor();
@@ -230,7 +258,11 @@ fn apply_path_part(value: Value, part: &PathPart, original_path: &str) -> Result
 
             // Get the field value (this returns the default if not set)
             let value = msg.get_field(&field).into_owned();
-            Ok(resolve_enum_names(value, &field))
+            let map_key_field = map_key_field_descriptor(&field);
+            Ok(PathValue::with_map_key(
+                resolve_enum_names(value, &field),
+                map_key_field,
+            ))
         }
         (Value::List(list), PathPart::Index(idx)) => {
             if *idx >= list.len() {
@@ -240,30 +272,24 @@ fn apply_path_part(value: Value, part: &PathPart, original_path: &str) -> Result
                     list.len(),
                 ));
             }
-            Ok(list[*idx].clone())
+            Ok(PathValue::new(list[*idx].clone()))
         }
         (Value::Map(map), PathPart::MapKey(key)) => {
-            // Try different key types
-            let map_key = if let Ok(i) = key.parse::<i32>() {
-                Some(MapKey::I32(i))
-            } else if let Ok(i) = key.parse::<i64>() {
-                Some(MapKey::I64(i))
-            } else if let Ok(b) = key.parse::<bool>() {
-                Some(MapKey::Bool(b))
-            } else {
-                Some(MapKey::String(key.clone()))
-            };
-
-            if let Some(mk) = map_key {
-                map.get(&mk).cloned().ok_or_else(|| {
+            let map_key = parse_map_key(key, map_key_field.as_ref(), original_path)?;
+            map.get(&map_key)
+                .cloned()
+                .map(PathValue::new)
+                .ok_or_else(|| {
                     ProtoDuckError::MapKeyNotFound(key.clone(), original_path.to_string())
                 })
-            } else {
-                Err(ProtoDuckError::MapKeyNotFound(
-                    key.clone(),
-                    original_path.to_string(),
-                ))
-            }
+        }
+        (Value::Map(map), PathPart::Index(idx)) => {
+            let key = idx.to_string();
+            let map_key = parse_map_key(&key, map_key_field.as_ref(), original_path)?;
+            map.get(&map_key)
+                .cloned()
+                .map(PathValue::new)
+                .ok_or_else(|| ProtoDuckError::MapKeyNotFound(key, original_path.to_string()))
         }
         (Value::List(_), PathPart::Field(f)) => Err(ProtoDuckError::InvalidFieldPath(format!(
             "Cannot access field '{}' on a repeated value - use an index first",
@@ -280,6 +306,89 @@ fn apply_path_part(value: Value, part: &PathPart, original_path: &str) -> Result
             "Cannot access field '{}' on non-message value",
             f
         ))),
+    }
+}
+
+/// Return the descriptor for a protobuf map field's key, if this field is a map.
+fn map_key_field_descriptor(field: &FieldDescriptor) -> Option<FieldDescriptor> {
+    if let Kind::Message(message) = field.kind() {
+        if field.is_map() {
+            return Some(message.map_entry_key_field());
+        }
+    }
+    None
+}
+
+/// Parse a path key according to the protobuf map's declared key type.
+fn parse_map_key(
+    key: &str,
+    key_field: Option<&FieldDescriptor>,
+    original_path: &str,
+) -> Result<MapKey> {
+    let Some(key_field) = key_field else {
+        return Err(ProtoDuckError::InvalidFieldPath(format!(
+            "Cannot resolve map key '{}' without map key type metadata in '{}'",
+            key, original_path
+        )));
+    };
+
+    match key_field.kind() {
+        Kind::Bool => key
+            .parse::<bool>()
+            .map(MapKey::Bool)
+            .map_err(|_| invalid_map_key(key, key_field, original_path)),
+        Kind::Int32 | Kind::Sint32 | Kind::Sfixed32 => key
+            .parse::<i32>()
+            .map(MapKey::I32)
+            .map_err(|_| invalid_map_key(key, key_field, original_path)),
+        Kind::Int64 | Kind::Sint64 | Kind::Sfixed64 => key
+            .parse::<i64>()
+            .map(MapKey::I64)
+            .map_err(|_| invalid_map_key(key, key_field, original_path)),
+        Kind::Uint32 | Kind::Fixed32 => key
+            .parse::<u32>()
+            .map(MapKey::U32)
+            .map_err(|_| invalid_map_key(key, key_field, original_path)),
+        Kind::Uint64 | Kind::Fixed64 => key
+            .parse::<u64>()
+            .map(MapKey::U64)
+            .map_err(|_| invalid_map_key(key, key_field, original_path)),
+        Kind::String => Ok(MapKey::String(key.to_string())),
+        _ => Err(ProtoDuckError::InvalidFieldPath(format!(
+            "Unsupported map key type for '{}' in '{}'",
+            key, original_path
+        ))),
+    }
+}
+
+fn invalid_map_key(key: &str, key_field: &FieldDescriptor, original_path: &str) -> ProtoDuckError {
+    ProtoDuckError::InvalidFieldPath(format!(
+        "Map key '{}' cannot be parsed as {} in '{}'",
+        key,
+        field_kind_name(key_field),
+        original_path
+    ))
+}
+
+fn field_kind_name(field: &FieldDescriptor) -> &'static str {
+    match field.kind() {
+        Kind::Double => "double",
+        Kind::Float => "float",
+        Kind::Int64 => "int64",
+        Kind::Uint64 => "uint64",
+        Kind::Int32 => "int32",
+        Kind::Fixed64 => "fixed64",
+        Kind::Fixed32 => "fixed32",
+        Kind::Bool => "bool",
+        Kind::String => "string",
+        Kind::Bytes => "bytes",
+        Kind::Uint32 => "uint32",
+        Kind::Sfixed32 => "sfixed32",
+        Kind::Sfixed64 => "sfixed64",
+        Kind::Sint32 => "sint32",
+        Kind::Sint64 => "sint64",
+        Kind::Enum(_) => "enum",
+        Kind::Message(_) => "message",
     }
 }
 
@@ -354,6 +463,11 @@ fn value_to_string(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use crate::descriptor_pool::{
+        add_schema_from_proto, get_message_descriptor, DescriptorPoolState,
+    };
 
     #[test]
     fn test_parse_simple_path() {
@@ -380,5 +494,73 @@ mod tests {
         let parts = parse_field_path("properties['key']").unwrap();
         assert_eq!(parts.len(), 2);
         assert!(matches!(&parts[1], PathPart::MapKey(s) if s == "key"));
+    }
+
+    #[test]
+    fn test_extract_map_key_uses_declared_key_type() {
+        let message = map_test_message();
+
+        assert_eq!(
+            extract_field_value(&message, "int64_values[1]").unwrap(),
+            "signed"
+        );
+        assert_eq!(
+            extract_field_value(&message, "uint64_values[1]").unwrap(),
+            "unsigned"
+        );
+        assert_eq!(
+            extract_field_value(&message, "string_values[\"1\"]").unwrap(),
+            "string"
+        );
+    }
+
+    #[test]
+    fn test_extract_map_key_rejects_invalid_declared_type() {
+        let message = map_test_message();
+        let err = extract_field_value(&message, "uint64_values[-1]").unwrap_err();
+
+        assert!(matches!(err, ProtoDuckError::InvalidFieldPath(_)));
+    }
+
+    fn map_test_message() -> DynamicMessage {
+        let proto = r#"
+            syntax = "proto3";
+            package maptest;
+
+            message Maps {
+                map<int64, string> int64_values = 1;
+                map<uint64, string> uint64_values = 2;
+                map<string, string> string_values = 3;
+            }
+        "#;
+
+        let state = DescriptorPoolState::default();
+        add_schema_from_proto(&state, proto).unwrap();
+        let descriptor = get_message_descriptor(&state, "maptest.Maps").unwrap();
+        let mut message = DynamicMessage::new(descriptor);
+
+        message.set_field_by_name(
+            "int64_values",
+            Value::Map(HashMap::from([(
+                MapKey::I64(1),
+                Value::String("signed".to_string()),
+            )])),
+        );
+        message.set_field_by_name(
+            "uint64_values",
+            Value::Map(HashMap::from([(
+                MapKey::U64(1),
+                Value::String("unsigned".to_string()),
+            )])),
+        );
+        message.set_field_by_name(
+            "string_values",
+            Value::Map(HashMap::from([(
+                MapKey::String("1".to_string()),
+                Value::String("string".to_string()),
+            )])),
+        );
+
+        message
     }
 }
