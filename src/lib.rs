@@ -180,16 +180,21 @@ impl VArrowScalar for ProtoToJson {
         let results: Vec<Option<String>> = blob_col
             .iter()
             .zip(type_col.iter())
-            .map(|(blob, message_type)| match (blob, message_type) {
-                (Some(data), Some(mt)) => decode_message(state, data, mt)
-                    .and_then(|msg| message_to_json(&msg))
-                    .and_then(|json| {
-                        serde_json::to_string(&json).map_err(crate::error::ProtoDuckError::from)
-                    })
-                    .ok(),
-                _ => None,
-            })
-            .collect();
+            .map(
+                |(blob, message_type)| -> Result<Option<String>, crate::error::ProtoDuckError> {
+                    match (blob, message_type) {
+                        (Some(data), Some(mt)) => decode_message(state, data, mt)
+                            .and_then(|msg| message_to_json(&msg))
+                            .and_then(|json| {
+                                serde_json::to_string(&json)
+                                    .map_err(crate::error::ProtoDuckError::from)
+                            })
+                            .map(Some),
+                        _ => Ok(None),
+                    }
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Arc::new(StringArray::from(results)))
     }
@@ -238,14 +243,19 @@ impl VArrowScalar for ProtoGet {
             .zip(type_col.iter())
             .zip(path_col.iter())
             .map(
-                |((blob, message_type), field_path)| match (blob, message_type, field_path) {
-                    (Some(data), Some(mt), Some(path)) => decode_message(state, data, mt)
-                        .and_then(|msg| extract_field_value(&msg, path))
-                        .ok(),
-                    _ => None,
+                |((blob, message_type), field_path)| -> Result<
+                    Option<String>,
+                    crate::error::ProtoDuckError,
+                > {
+                    match (blob, message_type, field_path) {
+                        (Some(data), Some(mt), Some(path)) => decode_message(state, data, mt)
+                            .and_then(|msg| extract_field_value(&msg, path))
+                            .map(Some),
+                        _ => Ok(None),
+                    }
                 },
             )
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Arc::new(StringArray::from(results)))
     }
