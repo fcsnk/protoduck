@@ -11,8 +11,8 @@ crate-type = ["cdylib"]
 name = "protoduck"
 
 [dependencies]
-duckdb = { version = "=1.10502.0", features = ["loadable-extension", "vscalar", "vscalar-arrow"] }
-libduckdb-sys = { version = "=1.10502.0", features = ["loadable-extension"] }
+duckdb = { version = "=1.10504.0", features = ["loadable-extension", "vscalar", "vscalar-arrow"] }
+libduckdb-sys = { version = "=1.10504.0", features = ["loadable-extension"] }
 
 
 prost = "0.13"
