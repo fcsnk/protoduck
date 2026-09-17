@@ -7,7 +7,7 @@ EXTENSION_NAME=protoduck
 # Required: duckdb-rs vscalar feature uses unstable C API
 USE_UNSTABLE_C_API=1
 
-TARGET_DUCKDB_VERSION=v1.5.4
+TARGET_DUCKDB_VERSION=v1.5.5
 
 all: release
 

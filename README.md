@@ -32,7 +32,7 @@ LOAD protoduck;
 
 Prerequisites:
 
-- DuckDB v1.5.2 (the extension is pinned to this release via the unstable C API)
+- DuckDB v1.5.5 (the extension is pinned to this release via the unstable C API)
 - Rust (stable, 1.80 or later)
 - Python 3 (used by the DuckDB extension build tooling and tests)
 - `make` and a C toolchain
