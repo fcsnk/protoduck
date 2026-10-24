@@ -4,11 +4,11 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 EXTENSION_NAME=protoduck
 
-# The stable C API (no USE_UNSTABLE_C_API): one binary loads on every DuckDB from v1.5.2 (the floor the entrypoint
+# The stable C API (no USE_UNSTABLE_C_API): one binary loads on every DuckDB from v1.5.6 (the floor the entrypoint
 # declares) through v2.0.x. The unstable ABI pins a binary to one exact DuckDB, and DuckDB 2.0 requires an unstable-ABI
 # extension to export the v2 entrypoint (<name>_init_c_api_v2), which duckdb-rs only offers on its duckdb-neo API.
 
-TARGET_DUCKDB_VERSION=v1.5.2
+TARGET_DUCKDB_VERSION=v1.5.6
 
 all: release
 

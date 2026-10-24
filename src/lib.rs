@@ -281,7 +281,7 @@ impl VArrowScalar for ProtoGet {
 // Extension Entry Point
 // ============================================================================
 
-#[duckdb_entrypoint_c_api(ext_name = "protoduck", min_duckdb_version = "v1.5.2")]
+#[duckdb_entrypoint_c_api(ext_name = "protoduck", min_duckdb_version = "v1.5.6")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn std::error::Error>> {
     let descriptor_state = DescriptorPoolState::default();
 

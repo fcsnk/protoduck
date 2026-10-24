@@ -17,6 +17,7 @@ jobs:
     with:
       duckdb_version: v2.0.0
       ci_tools_version: v2.0-cyanoptera
+      reduced_ci_mode: 'disabled'
       extension_name: protoduck
       extra_toolchains: rust;python3
       exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads'
