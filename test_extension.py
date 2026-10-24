@@ -50,6 +50,7 @@ def assert_contains(label: str, haystack: str, needle: str) -> None:
 
 
 con = duckdb.connect(config={"allow_unsigned_extensions": True})
+assert_eq("DuckDB runtime", con.execute("SELECT version()").fetchone()[0], "v2.0.0")
 con.execute("LOAD './build/release/protoduck.duckdb_extension'")
 
 con.execute(
@@ -137,5 +138,54 @@ if not description:
     print("FAIL proto_describe returned empty result")
     sys.exit(1)
 print(f"ok   proto_describe: {len(description)} chars")
+
+# Exercise the binary schema registration entry point without requiring protoc
+# or the Python protobuf package. This encodes a FileDescriptorSet containing
+# binary_test.Item { string value = 1; }.
+field_descriptor = (
+    string_field(1, "value")
+    + varint_field(3, 1)  # number
+    + varint_field(4, 1)  # LABEL_OPTIONAL
+    + varint_field(5, 9)  # TYPE_STRING
+)
+message_descriptor = string_field(1, "Item") + length_delimited(2, field_descriptor)
+file_descriptor = (
+    string_field(1, "binary_test.proto")
+    + string_field(2, "binary_test")
+    + length_delimited(4, message_descriptor)
+    + string_field(12, "proto3")
+)
+descriptor_set = length_delimited(1, file_descriptor)
+loaded = con.execute("SELECT proto_schema_add_binary(?)", [descriptor_set]).fetchone()[0]
+assert_contains("proto_schema_add_binary", loaded, "binary_test.Item")
+value = con.execute(
+    "SELECT proto_get(?, 'binary_test.Item', 'value')", [string_field(1, "from binary")]
+).fetchone()[0]
+assert_eq("binary schema decode", value, "from binary")
+assert_eq(
+    "binary schema NULL",
+    con.execute("SELECT proto_schema_add_binary(NULL::BLOB)").fetchone()[0],
+    None,
+)
+
+# Native VARCHAR/BLOB vector handling must preserve byte lengths, including
+# out-of-line strings, Unicode, and embedded NUL bytes.
+long_value = "Duck 🦆\x00" * 200
+actual = con.execute(
+    "SELECT proto_get(?, 'binary_test.Item', 'value')", [string_field(1, long_value)]
+).fetchone()[0]
+assert_eq("long Unicode/NUL string", actual == long_value, True)
+
+# Each database gets its own schema pool. A normal callback error must leave
+# the database usable, rather than raising an INTERNAL error under C API v2.
+with duckdb.connect(config={"allow_unsigned_extensions": True}) as other:
+    other.execute("LOAD './build/release/protoduck.duckdb_extension'")
+    try:
+        other.execute("SELECT proto_describe('test.Person')").fetchone()
+    except duckdb.InvalidInputException as error:
+        assert_contains("schema pool isolation", str(error), "Message type 'test.Person' not found")
+    else:
+        raise AssertionError("Schema leaked into a separate database")
+    assert_eq("connection usable after error", other.execute("SELECT 42").fetchone()[0], 42)
 
 print("\nAll tests passed!")

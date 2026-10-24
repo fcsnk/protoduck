@@ -115,6 +115,18 @@ SELECT proto_to_json(
 ----
 Message type 'demo.Missing' not found. Did you load the schema with proto_schema_add()?
 
+# Malformed protobuf input should surface as a recoverable query error.
+statement error
+SELECT proto_to_json('\xff'::BLOB, 'demo.Person');
+----
+Failed to decode protobuf message:
+
+statement error
+SELECT proto_schema_add_binary('\xff'::BLOB);
+----
+Failed to decode protobuf message:
+
+# Callback errors above must not invalidate the database.
 # Numeric map keys should use the map's declared key type, not a guessed type.
 statement ok
 SELECT proto_schema_add('
@@ -142,3 +154,48 @@ SELECT
     );
 ----
 signed	unsigned
+
+# Exercise vector conversion across multiple chunks, mixed NULL inputs, and
+# filtered vectors. Constant-only queries can hide ABI/vector regressions.
+statement ok
+CREATE TABLE vector_inputs AS
+SELECT i,
+       CASE WHEN i % 7 = 0 THEN NULL
+            WHEN i % 2 = 0 THEN '\x0a\x05Alice'::BLOB
+            ELSE '\x0a\x03Bob'::BLOB END AS data,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE 'demo.Person' END AS message_type,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE 'name' END AS field_path,
+       CASE WHEN i % 7 = 0 OR i % 11 = 0 OR i % 13 = 0 THEN NULL
+            WHEN i % 2 = 0 THEN 'Alice' ELSE 'Bob' END AS expected
+FROM range(5000) t(i);
+
+# The usual column-decoding call mixes a data vector with constant arguments.
+query I
+SELECT count(*) FROM vector_inputs
+WHERE proto_get(data, 'demo.Person', 'name') IS DISTINCT FROM
+      CASE WHEN data IS NULL THEN NULL
+           WHEN i % 2 = 0 THEN 'Alice' ELSE 'Bob' END;
+----
+0
+
+query I
+SELECT count(*) FROM vector_inputs
+WHERE proto_get(data, message_type, field_path) IS DISTINCT FROM expected;
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT proto_get(data, message_type, field_path) AS actual, expected
+    FROM vector_inputs WHERE i % 97 = 0
+) WHERE actual IS DISTINCT FROM expected;
+----
+0
+
+query I
+SELECT count(*) FROM vector_inputs
+WHERE proto_decode(data, message_type) IS DISTINCT FROM proto_to_json(data, message_type)
+   OR (proto_to_json(data, message_type) IS NULL)
+      IS DISTINCT FROM (data IS NULL OR message_type IS NULL);
+----
+0

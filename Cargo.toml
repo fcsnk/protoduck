@@ -2,6 +2,7 @@
 name = "protoduck"
 version = "0.1.2"
 edition = "2021"
+rust-version = "1.88"
 description = "DuckDB extension for deserializing Protocol Buffer messages stored in columns"
 license = "MIT"
 repository = "https://github.com/fcsnk/protoduck"
@@ -11,8 +12,8 @@ crate-type = ["cdylib"]
 name = "protoduck"
 
 [dependencies]
-duckdb = { version = "=1.10505.0", features = ["loadable-extension", "vscalar", "vscalar-arrow"] }
-libduckdb-sys = { version = "=1.10505.0", features = ["loadable-extension"] }
+duckdb-neo = { version = "=0.20000.0", default-features = false, features = ["build-extension"] }
+duckdb-loadable-macros = { version = "=1.20000.0", features = ["neo"] }
 
 
 prost = "0.13"

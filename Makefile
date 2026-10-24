@@ -4,10 +4,12 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 EXTENSION_NAME=protoduck
 
-# Required: duckdb-rs vscalar feature uses unstable C API
+# DuckDB's C API v2 is unstable and pins binaries to the exact engine release.
 USE_UNSTABLE_C_API=1
 
-TARGET_DUCKDB_VERSION=v1.5.5
+TARGET_DUCKDB_VERSION=v2.0.0
+# The unstable C API requires the test runtime to match the built extension.
+DUCKDB_TEST_VERSION?=$(patsubst v%,%,$(TARGET_DUCKDB_VERSION))
 
 all: release
 
@@ -48,6 +50,6 @@ check:
 
 install: release
 	@PLATFORM=$$(cat configure/platform.txt); \
-	mkdir -p ~/.duckdb/extensions/$$PLATFORM; \
-	cp build/release/$(EXTENSION_NAME).duckdb_extension ~/.duckdb/extensions/$$PLATFORM/; \
-	echo "Installed to ~/.duckdb/extensions/$$PLATFORM/"
+	mkdir -p ~/.duckdb/extensions/$(TARGET_DUCKDB_VERSION)/$$PLATFORM; \
+	cp build/release/$(EXTENSION_NAME).duckdb_extension ~/.duckdb/extensions/$(TARGET_DUCKDB_VERSION)/$$PLATFORM/; \
+	echo "Installed to ~/.duckdb/extensions/$(TARGET_DUCKDB_VERSION)/$$PLATFORM/"

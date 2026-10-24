@@ -8,12 +8,18 @@ mod descriptor_pool;
 mod error;
 mod type_mapping;
 
-use std::sync::Arc;
-
-use duckdb::arrow::array::{Array, BinaryArray, RecordBatch, StringArray};
-use duckdb::arrow::datatypes::DataType;
-use duckdb::vscalar::arrow::{ArrowFunctionSignature, VArrowScalar};
-use duckdb::{duckdb_entrypoint_c_api, Connection};
+use duckdb_loadable_macros::duckdb_entrypoint_c_api_v2;
+use duckdb_neo::{
+    connection::Context,
+    data_chunk::VectorCollection,
+    enums::{FunctionProperty, FunctionPropertyStability},
+    extension::Extension,
+    scalar::{ScalarCallbacks, ScalarFunctionBuilder},
+    signature::{FunctionParameter, SignatureBuilder},
+    types::BlobValue,
+    vector::{Unknown, Vector},
+    DuckDBType,
+};
 
 use crate::descriptor_pool::{
     add_schema_from_binary, add_schema_from_proto, decode_message, describe_message_type,
@@ -21,283 +27,185 @@ use crate::descriptor_pool::{
 };
 use crate::type_mapping::{extract_field_value, message_to_json};
 
-// ============================================================================
-// Proto Schema Add Function
-// ============================================================================
-
-struct ProtoSchemaAdd;
-
-impl VArrowScalar for ProtoSchemaAdd {
-    type State = DescriptorPoolState;
-
-    fn invoke(
-        state: &Self::State,
-        input: RecordBatch,
-    ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
-        let content_col = input
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("Expected string array for proto content")?;
-
-        let results: Vec<Option<String>> = content_col
-            .iter()
-            .map(
-                |content| -> Result<Option<String>, crate::error::ProtoDuckError> {
-                    match content {
-                        Some(proto_content) => {
-                            add_schema_from_proto(state, proto_content).map(|types| {
-                                Some(format!(
-                                    "Loaded {} message type(s): {}",
-                                    types.len(),
-                                    types.join(", ")
-                                ))
-                            })
-                        }
-                        None => Ok(None),
-                    }
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Arc::new(StringArray::from(results)))
-    }
-
-    fn signatures() -> Vec<ArrowFunctionSignature> {
-        vec![ArrowFunctionSignature::exact(
-            vec![DataType::Utf8],
-            DataType::Utf8,
-        )]
-    }
+#[derive(Clone, Copy)]
+enum Operation {
+    SchemaAdd,
+    SchemaAddBinary,
+    Describe,
+    ToJson,
+    Get,
 }
 
-// ============================================================================
-// Proto Schema Add Binary Function
-// ============================================================================
+struct ProtoScalar {
+    operation: Operation,
+    state: DescriptorPoolState,
+}
 
-struct ProtoSchemaAddBinary;
+fn schema_loaded(types: Vec<String>) -> String {
+    format!(
+        "Loaded {} message type(s): {}",
+        types.len(),
+        types.join(", ")
+    )
+}
 
-impl VArrowScalar for ProtoSchemaAddBinary {
-    type State = DescriptorPoolState;
+// Copy each string into DuckDB's output vector before dropping its Rust buffer.
+// Invalid schemas, messages, and field paths are query errors, not INTERNAL
+// errors (which would invalidate the database under C API v2).
+fn write_results(
+    output: Vector<'_, Unknown>,
+    results: impl ExactSizeIterator<Item = crate::error::Result<Option<String>>>,
+) -> duckdb_neo::Result<()> {
+    let mut output = output.cast::<String>()?;
+    output.set_size(results.len())?;
+    let mut writer = output.writer()?;
+    for (row, result) in results.enumerate() {
+        let value = result.map_err(|err| duckdb_neo::Error::invalid_input(err.to_string()))?;
+        writer.set(row, value.as_deref())?;
+    }
+    Ok(())
+}
 
-    fn invoke(
-        state: &Self::State,
-        input: RecordBatch,
-    ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
-        let blob_col = input
-            .column(0)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .ok_or("Expected binary array for descriptor set")?;
+impl ScalarCallbacks for ProtoScalar {
+    type BindData = ();
+    type InitData = ();
 
-        let results: Vec<Option<String>> = blob_col
-            .iter()
-            .map(
-                |blob| -> Result<Option<String>, crate::error::ProtoDuckError> {
-                    match blob {
-                        Some(data) => add_schema_from_binary(state, data).map(|types| {
-                            Some(format!(
-                                "Loaded {} message type(s): {}",
-                                types.len(),
-                                types.join(", ")
-                            ))
+    fn exec(
+        &self,
+        _bind_data: Option<&Self::BindData>,
+        _init_data: Option<&mut Self::InitData>,
+        _context: &Context,
+        input: &mut VectorCollection,
+        output: Vector<'_, Unknown>,
+    ) -> duckdb_neo::Result<()> {
+        let state = &self.state;
+        match self.operation {
+            Operation::SchemaAdd => {
+                let content = input.get_vector_at::<String>(0)?.reader()?;
+                write_results(
+                    output,
+                    content.iter().map(|value| {
+                        value
+                            .map(|value| add_schema_from_proto(state, value).map(schema_loaded))
+                            .transpose()
+                    }),
+                )
+            }
+            Operation::SchemaAddBinary => {
+                let data = input.get_vector_at::<BlobValue>(0)?.reader()?;
+                write_results(
+                    output,
+                    data.iter().map(|value| {
+                        value
+                            .map(|value| add_schema_from_binary(state, value).map(schema_loaded))
+                            .transpose()
+                    }),
+                )
+            }
+            Operation::Describe => {
+                let message_type = input.get_vector_at::<String>(0)?.reader()?;
+                write_results(
+                    output,
+                    message_type.iter().map(|value| {
+                        value
+                            .map(|value| describe_message_type(state, value))
+                            .transpose()
+                    }),
+                )
+            }
+            Operation::ToJson => {
+                let data = input.get_vector_at::<BlobValue>(0)?.reader()?;
+                let message_type = input.get_vector_at::<String>(1)?.reader()?;
+                write_results(
+                    output,
+                    data.iter()
+                        .zip(message_type.iter())
+                        .map(|(data, message_type)| match (data, message_type) {
+                            (Some(data), Some(message_type)) => {
+                                let message = decode_message(state, data, message_type)?;
+                                let json = message_to_json(&message)?;
+                                Ok(Some(serde_json::to_string(&json)?))
+                            }
+                            _ => Ok(None),
                         }),
-                        None => Ok(None),
-                    }
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Arc::new(StringArray::from(results)))
-    }
-
-    fn signatures() -> Vec<ArrowFunctionSignature> {
-        vec![ArrowFunctionSignature::exact(
-            vec![DataType::Binary],
-            DataType::Utf8,
-        )]
-    }
-}
-
-// ============================================================================
-// Proto Describe Function
-// ============================================================================
-
-struct ProtoDescribe;
-
-impl VArrowScalar for ProtoDescribe {
-    type State = DescriptorPoolState;
-
-    fn invoke(
-        state: &Self::State,
-        input: RecordBatch,
-    ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
-        let type_col = input
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("Expected string array for message type")?;
-
-        let results: Vec<Option<String>> = type_col
-            .iter()
-            .map(
-                |message_type| -> Result<Option<String>, crate::error::ProtoDuckError> {
-                    match message_type {
-                        Some(mt) => describe_message_type(state, mt).map(Some),
-                        None => Ok(None),
-                    }
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Arc::new(StringArray::from(results)))
-    }
-
-    fn signatures() -> Vec<ArrowFunctionSignature> {
-        vec![ArrowFunctionSignature::exact(
-            vec![DataType::Utf8],
-            DataType::Utf8,
-        )]
+                )
+            }
+            Operation::Get => {
+                let data = input.get_vector_at::<BlobValue>(0)?.reader()?;
+                let message_type = input.get_vector_at::<String>(1)?.reader()?;
+                let path = input.get_vector_at::<String>(2)?.reader()?;
+                write_results(
+                    output,
+                    data.iter().zip(message_type.iter()).zip(path.iter()).map(
+                        |((data, message_type), path)| match (data, message_type, path) {
+                            (Some(data), Some(message_type), Some(path)) => {
+                                let message = decode_message(state, data, message_type)?;
+                                extract_field_value(&message, path).map(Some)
+                            }
+                            _ => Ok(None),
+                        },
+                    ),
+                )
+            }
+        }
     }
 }
 
-// ============================================================================
-// Proto To JSON Function
-// ============================================================================
+#[duckdb_entrypoint_c_api_v2(extension_name = "protoduck", api_version = "v2.0.0")]
+pub fn extension_entrypoint(extension: &Extension) -> duckdb_neo::Result<()> {
+    let state = DescriptorPoolState::default();
 
-struct ProtoToJson;
+    for (name, operation) in [
+        ("proto_schema_add", Operation::SchemaAdd),
+        ("proto_schema_add_binary", Operation::SchemaAddBinary),
+        ("proto_describe", Operation::Describe),
+        ("proto_to_json", Operation::ToJson),
+        ("proto_decode", Operation::ToJson),
+        ("proto_get", Operation::Get),
+    ] {
+        let signature = match operation {
+            Operation::SchemaAdd => {
+                SignatureBuilder::new().param(FunctionParameter::new::<String>("proto_content"))
+            }
+            Operation::SchemaAddBinary => {
+                SignatureBuilder::new().param(FunctionParameter::new::<BlobValue>("descriptor_set"))
+            }
+            Operation::Describe => {
+                SignatureBuilder::new().param(FunctionParameter::new::<String>("message_type"))
+            }
+            Operation::ToJson | Operation::Get => {
+                let signature = SignatureBuilder::new()
+                    .param(FunctionParameter::new::<BlobValue>("data"))
+                    .param(FunctionParameter::new::<String>("message_type"));
+                if matches!(operation, Operation::Get) {
+                    signature.param(FunctionParameter::new::<String>("field_path"))
+                } else {
+                    signature
+                }
+            }
+        }
+        .return_type(String::logical_type(extension)?);
 
-impl VArrowScalar for ProtoToJson {
-    type State = DescriptorPoolState;
-
-    fn invoke(
-        state: &Self::State,
-        input: RecordBatch,
-    ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
-        let blob_col = input
-            .column(0)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .ok_or("Expected binary array for protobuf data")?;
-
-        let type_col = input
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("Expected string array for message type")?;
-
-        let results: Vec<Option<String>> = blob_col
-            .iter()
-            .zip(type_col.iter())
-            .map(
-                |(blob, message_type)| -> Result<Option<String>, crate::error::ProtoDuckError> {
-                    match (blob, message_type) {
-                        (Some(data), Some(mt)) => decode_message(state, data, mt)
-                            .and_then(|msg| message_to_json(&msg))
-                            .and_then(|json| {
-                                serde_json::to_string(&json)
-                                    .map_err(crate::error::ProtoDuckError::from)
-                            })
-                            .map(Some),
-                        _ => Ok(None),
-                    }
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Arc::new(StringArray::from(results)))
+        // Schema registration mutates shared state and must run at execution,
+        // including when a prepared statement is executed more than once.
+        let stability = match operation {
+            Operation::SchemaAdd | Operation::SchemaAddBinary => {
+                FunctionPropertyStability::Volatile
+            }
+            _ => FunctionPropertyStability::ConsistentWithinQuery,
+        };
+        ScalarFunctionBuilder::new(
+            name,
+            signature,
+            ProtoScalar {
+                operation,
+                state: state.clone(),
+            },
+        )
+        .set_property(FunctionProperty::Stability(stability))
+        .set_property(FunctionProperty::HasSpecialNullHandling(true))
+        .register(extension)?;
     }
-
-    fn signatures() -> Vec<ArrowFunctionSignature> {
-        vec![ArrowFunctionSignature::exact(
-            vec![DataType::Binary, DataType::Utf8],
-            DataType::Utf8,
-        )]
-    }
-}
-
-// ============================================================================
-// Proto Get Function
-// ============================================================================
-
-struct ProtoGet;
-
-impl VArrowScalar for ProtoGet {
-    type State = DescriptorPoolState;
-
-    fn invoke(
-        state: &Self::State,
-        input: RecordBatch,
-    ) -> Result<Arc<dyn Array>, Box<dyn std::error::Error>> {
-        let blob_col = input
-            .column(0)
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .ok_or("Expected binary array for protobuf data")?;
-
-        let type_col = input
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("Expected string array for message type")?;
-
-        let path_col = input
-            .column(2)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("Expected string array for field path")?;
-
-        let results: Vec<Option<String>> = blob_col
-            .iter()
-            .zip(type_col.iter())
-            .zip(path_col.iter())
-            .map(
-                |((blob, message_type), field_path)| -> Result<
-                    Option<String>,
-                    crate::error::ProtoDuckError,
-                > {
-                    match (blob, message_type, field_path) {
-                        (Some(data), Some(mt), Some(path)) => decode_message(state, data, mt)
-                            .and_then(|msg| extract_field_value(&msg, path))
-                            .map(Some),
-                        _ => Ok(None),
-                    }
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Arc::new(StringArray::from(results)))
-    }
-
-    fn signatures() -> Vec<ArrowFunctionSignature> {
-        vec![ArrowFunctionSignature::exact(
-            vec![DataType::Binary, DataType::Utf8, DataType::Utf8],
-            DataType::Utf8,
-        )]
-    }
-}
-
-// ============================================================================
-// Extension Entry Point
-// ============================================================================
-
-#[duckdb_entrypoint_c_api(ext_name = "protoduck", min_duckdb_version = "v1.5.2")]
-pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn std::error::Error>> {
-    let descriptor_state = DescriptorPoolState::default();
-
-    // Register all scalar functions
-    con.register_scalar_function_with_state::<ProtoSchemaAdd>(
-        "proto_schema_add",
-        &descriptor_state,
-    )?;
-    con.register_scalar_function_with_state::<ProtoSchemaAddBinary>(
-        "proto_schema_add_binary",
-        &descriptor_state,
-    )?;
-    con.register_scalar_function_with_state::<ProtoDescribe>("proto_describe", &descriptor_state)?;
-    con.register_scalar_function_with_state::<ProtoToJson>("proto_to_json", &descriptor_state)?;
-    con.register_scalar_function_with_state::<ProtoToJson>("proto_decode", &descriptor_state)?; // alias
-    con.register_scalar_function_with_state::<ProtoGet>("proto_get", &descriptor_state)?;
 
     Ok(())
 }

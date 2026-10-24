@@ -32,10 +32,17 @@ LOAD protoduck;
 
 Prerequisites:
 
-- DuckDB v1.5.5 (the extension is pinned to this release via the unstable C API)
-- Rust (stable, 1.80 or later)
-- Python 3 (used by the DuckDB extension build tooling and tests)
+- DuckDB v2.0.0 (the extension is pinned to this release via the unstable C API)
+- Rust (stable, 1.88 or later)
+- Python 3.11 or later (used by the DuckDB extension build tooling and tests)
 - `make` and a C toolchain
+
+The Rust bindings (`duckdb-neo` 0.20000.0 and `duckdb-loadable-macros` 1.20000.0),
+C API v2 entry point, extension metadata, and test runtime all target DuckDB 2.0.0.
+Binaries built for 1.5.x must be rebuilt; this build does not load into 1.5.x.
+When upgrading an existing checkout, run
+`git submodule update --init --recursive` and `make clean_all` before configuring
+again so the test environment uses DuckDB 2.0.0.
 
 ```bash
 # Clone with submodules so the extension-ci-tools build scaffolding is pulled in.
@@ -70,7 +77,7 @@ A standalone Python smoke test is also included:
 
 ```bash
 make release
-python3 test_extension.py
+configure/venv/bin/python3 test_extension.py
 ```
 
 ### Loading the extension
@@ -87,7 +94,7 @@ con = duckdb.connect(config={"allow_unsigned_extensions": True})
 ```
 
 After `make install`, the extension lives in DuckDB's per-platform extension
-directory (`~/.duckdb/extensions/<platform>/`) and can be loaded by name:
+directory (`~/.duckdb/extensions/v2.0.0/<platform>/`) and can be loaded by name:
 
 ```sql
 LOAD protoduck;

@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -35,3 +37,15 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      - name: Install Python for DuckDB integration tests
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Build and test against DuckDB 2.0.0
+        run: |
+          make configure
+          make release
+          make test_release
+          configure/venv/bin/python3 test_extension.py
